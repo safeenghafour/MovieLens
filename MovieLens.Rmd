@@ -1,0 +1,655 @@
+---
+title: 'MovieLens: Movie recommendation system'
+author: "Safeen Ghafour"
+date: "November 23, 2020"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 3
+    number_sections: yes
+  word_document:
+    toc: yes
+    toc_depth: '3'
+  html_document:
+    toc: yes
+    toc_depth: '3'
+    df_print: paged
+subtitle: 'HarvardX PH125.9x - Data Science: Capstone'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+## Definition
+This assignment is part of HarvardX PH125.9x - Data Science: Capstone course. We will create a movie recommendation system using MovieLens dataset.
+
+## Recommendation systems
+Recommendation systems use ratings that users have given items to make specific recommendations.
+These systems, are taking an important place in the world of machine learning applications of Artificial Intelligence. The evolution of such systems is directly connected to their commercial use by tech giants like Netflix, Amazon and others to serve personalised content to the audience.
+
+The movie recommendation system is based on ratings given by users to movies. It will continuously undergo improvement as more data and interaction become available.
+
+## The Data
+For this project we will use a portion  of GroupLens research lab database that contains over 20 million ratings for over 27,000 unique movies rated by more than 138,000 unique users. 
+Our data subset is available at http://files.grouplens.org/datasets/movielens/ml-10m.zip and contains 10 million ratings.
+
+Essentially, the dataset consists of movie ratings in a many-to-many relationship with users.
+
+Each movie has one or more categories.
+The data does not contain any user demographics to identify or segregate users. 
+
+## Objective
+The objective of this project is to predict ratings for movies that are not included in the training subset. 
+
+Predictions will be evaluated using the root mean square error (RMSE) method (the lower the numerical value, the better). 
+The goal of the project is to achieve an RMSE lower than **0.86490**.
+
+# Data preparation
+We will first download the MovieLens subset. The compressed file contains two important files for our purpose:
+
+**movies.dat**: MovieId, Title and genres separated by pipe. The title contains the publication year of the movie.
+
+**ratings.dat**: userId, MovieId, rating and the timestamp of the rating.
+
+After joining the data from the two files in a new data-frame using movieId as key, we will split it to two random partitions, of which 10% is used for test and 90% for training
+
+```{r require-packages, echo = FALSE, message = FALSE, warning = FALSE, eval = TRUE}
+# Required packages
+library(tidyverse)
+library(caret)
+library(data.table)
+library(lemon)
+library(lubridate)
+```
+
+```{r prepare-code, echo = FALSE, message = FALSE, warning = FALSE, eval = TRUE, cache = TRUE}
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+# Download data
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# if using R 3.6 or earlier:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+# if using R 4.0 or later:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+
+```{r explode, echo = FALSE, message = FALSE, warning = FALSE, eval = TRUE, cache = TRUE}
+edxExploded <- edx %>%
+  separate_rows(genres, sep = "\\|") %>%
+  mutate(year = str_sub(title, -5, -2))
+```
+
+
+# Exploratory data analysis
+
+## Summaries
+To examine the data we will print the first six records:
+
+```{r c1, echo = FALSE, render=lemon_print, cache = TRUE}
+head(edx)
+```
+
+A summary of the training subset confirms that it contains 90% of the ratings, i.e. 9,000,055 records.
+
+```{r c2, echo = FALSE, render=lemon_print, cache = TRUE}
+  summary(edx)
+```
+
+And that the test subset contains 10% which is equivalent to 999,999 records.
+
+```{r c3, echo = FALSE, render = lemon_print, cache = TRUE}
+summary(validation)
+```
+
+```{r c4, echo = FALSE, results="hide", cache = TRUE}
+str(edx)
+```
+
+There are **6** variables in the dataset:
+
+**userId**, **movieId**, **rating**, **timestamp**, **title**, **genres**.
+
+## Analysis
+To better understand the data we will perform some basic data analysis.
+
+```{r c5, echo = FALSE, results="hide", cache = TRUE}
+nmovies <- n_distinct(edx$movieId)
+nusers <- n_distinct(edx$userId)
+```
+
+### The totals 
+The total number of unique movies is **`r format(nmovies, big.mark=",")`** rated by **`r format(nusers, big.mark=",")`** unique users.
+
+### The best movies
+As we see from the table below, 'Pulp Fiction' is the most rated movie, however if we sort the table by the highest average of ratings, 'Who's Singin' Over There?' has the highest average rating.
+
+‘Pulp Fiction’has 31,362 ratings with an average of 4.154.
+
+```{r c6a, echo = FALSE, render = lemon_print, message = FALSE, warning = FALSE, cache = TRUE}
+#The most rates
+edx %>% 
+  group_by(movieId) %>% 
+  summarise(Title = unique(title), 
+            ratings_count = n(), 
+            rating_average = mean(rating)) %>% 
+  arrange(desc(ratings_count)) %>%
+  top_n(10, ratings_count)
+
+```
+
+'Who's Singin' Over There?' has a rating average of 4.75 however it is rated 4 times only.
+
+```{r c6b, echo = FALSE, render = lemon_print, message = FALSE, warning = FALSE, cache = TRUE}
+#The best rated
+edx %>% 
+  group_by(movieId) %>% 
+  summarise(Title = unique(title), 
+            ratings_count = n(), 
+            ratings_average = mean(rating)) %>% 
+  arrange(desc(ratings_count)) %>%
+  top_n(10, ratings_average)
+
+```
+
+### Movie effect
+There is a wide variation in the quantity of ratings each movie has received.
+Not every movie is rated the same. There are **126** movies that have received only **1** rating while only **3** movies have been rated **30,000** or more times.
+
+The average number of ratings per movie is **843**.
+
+```{r c14, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE}
+edx %>%
+  count(movieId) %>%
+  ggplot(aes(n)) +
+  geom_histogram(bins = 100, color = "#ffffff", fill = "#34495e") +
+  scale_x_log10() +
+  xlab("Count of ratings") +
+  ylab("Number of movies") +
+  theme_light()
+```
+
+```{r c15, echo = FALSE, message = FALSE, warning = FALSE, results="hide", cache = TRUE}
+# movies with 1 or less rating
+ulr <- edx %>%
+  group_by(movieId) %>%
+  summarise(nr = n()) %>%
+  filter(nr <= 1)
+
+count(ulr)
+
+# movies with 1 or less rating
+utr <- edx %>%
+  group_by(movieId) %>%
+  summarise(nr = n()) %>%
+  filter(nr <= 1)
+
+count(utr)
+
+# movie ratings mean
+mnr <- edx %>%
+  group_by(movieId) %>%
+  summarise(nr = n()) 
+
+mean(mnr$nr)
+```
+
+### User effect
+Grouping the data by rating gives a clear view of rating distribution. A **4** rating is by far the most popular.
+In this act of generosity by users **50%** of the movies got a 4 or higher.
+
+```{r c10, echo = FALSE, message = FALSE, warning = FALSE, cache = TRUE}
+edx %>% 
+  group_by(rating) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(rating, count)) +
+  geom_bar(stat = "identity", fill="#34495e") +
+  xlab("Rating") +
+  ylab("Count of ratings") +
+  theme_light()
+```
+
+User activity varies between a low of **10** and a maximum of **6,616** ratings per user. The average number of ratings made by the user population is **129** ratings per user.
+
+```{r c16, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE}
+edx %>%
+  count(userId) %>%
+  ggplot(aes(n)) +
+  geom_histogram(bins = 100, color = "#ffffff", fill = "#34495e") +
+  scale_x_log10() +
+  xlab("Number of users") +
+  ylab("Number of rated movies") + 
+  theme_light()
+```
+
+### Genres effect
+In the training dataset there is a genres column which is a string, with multiple components separated by a pipe character. There are **797** rated combinations with 'Drama' at the top.
+
+```{r c7, echo = FALSE, render = lemon_print, message = FALSE, warning = FALSE, cache = TRUE}
+edx %>% 
+  group_by(genres) %>%
+  summarize(N = n(), avg = mean(rating)) %>%
+  arrange(desc(N)) %>% 
+  top_n(10, N)
+```
+
+```{r c8, echo = FALSE, message = FALSE, warning = FALSE, cache = TRUE}
+ edxExploded %>% 
+   group_by(genres) %>%
+   summarize(count = n()) %>%
+   ggplot(aes(x = reorder(genres, -count), y = count)) +
+   geom_bar(stat = "identity", fill="#34495e") +
+   xlab("Genre") +
+   ylab("Count of movies") +
+   theme_light() +
+   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+If we split the genres column and arrange it by the number of ratings we get the following results and only **20** genres:
+
+```{r c9, echo = FALSE, render = lemon_print, message = FALSE, warning = FALSE, cache = TRUE}
+edx %>%
+  separate_rows(genres, sep = "\\|") %>%
+  group_by(genres) %>%
+  summarize(N = n(), avg = mean(rating)) %>%
+  arrange(desc(N)) %>% 
+  top_n(10, N)
+```
+
+For the sake of simplicity and the purposes of this analysis we disregard the accuracy or relevance of individual movie classifications into specific genres.
+
+### Time effect
+We find that there is an exponential increase in rating counts for movies released from around 1970 onward, reaching a peak in **1995**. Notable also is the even steeper exponential fall from the peak for movies released after **1995**.
+
+```{r c11, echo = FALSE, message = FALSE, warning = FALSE, cache = TRUE}
+edx %>% 
+   mutate(year = str_sub(title, -5, -2)) %>%
+   group_by(year) %>%
+   summarize(count = n()) %>%
+   ggplot(aes(x = year, y = count)) +
+   geom_bar(stat = "identity", fill="#34495e") +
+   xlab("Release year") +
+   ylab("Count of ratings") +
+   theme_light() +
+   theme(axis.text.x = element_text(angle = 90)) + 
+   scale_x_discrete(breaks=seq(1900, 2010, 10))
+```
+
+The chart above does not correlate with the year in which ratings were made. For example, the same data when presented based upon the year during which ratings occurred, a relatively consistent volume of user activity can be noted.
+
+```{r c12, echo = FALSE, message = FALSE, warning = FALSE, cache = TRUE}
+ edx %>% 
+   mutate(date = as_datetime(timestamp)) %>%
+   mutate(year = str_sub(date, 0, 4)) %>%
+   group_by(year) %>%
+   summarize(count = n()) %>%
+   ggplot(aes(x = year, y = count)) +
+   geom_bar(stat = "identity", fill="#34495e") +
+   xlab("Rating year") +
+   ylab("Count of ratings") +
+   theme_light() +
+   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+   scale_x_discrete(breaks=seq(1900, 2010, 2))
+```
+
+It is thought that the reason for this disparity is that users continuously rate movies from prior years. This seems clear from the distribution of the year of ratings for the movies released in **1995**. Clearly most ratings for 1995 releases happened in 1996 but user activity does continue there after.
+
+```{r c13, echo = FALSE, message = FALSE, warning = FALSE, cache = TRUE}
+ edx %>% 
+   mutate(date = as_datetime(timestamp)) %>%
+   mutate(year = str_sub(date, 0, 4)) %>%
+   mutate(releas_year = str_sub(title, -5, -2)) %>%
+   filter(releas_year == 1995) %>%
+   group_by(year) %>%
+   summarize(count = n()) %>%
+   ggplot(aes(x = year, y = count)) +
+   geom_bar(stat = "identity", fill="#34495e") +
+   xlab("Rating year for movies released in 1995") +
+   ylab("Count of ratings") +
+   theme_light() + 
+   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+   scale_x_discrete(breaks=seq(1900, 2010, 2))
+```
+
+
+# The model
+For this assignment we will use a loss function to determine the viability of the model. If the predictions of the model are less accurate, the residual mean squared error (RMSE) loss function will output a higher value, the more accurate the prediction, the lower the RMSE value.
+
+```{r c18, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE, cache = TRUE}
+# RMSE loss function
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+
+## The first model
+Our first model assumes that every movie will get the same rating based on the total average.
+
+```{r c19, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE, cache = TRUE}
+# The mean of all the ratings
+mu <- mean(edx$rating)
+mu
+```
+
+Calculate the RMSE
+
+```{r c20, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE, cache = TRUE}
+# Calculate the RMSE
+naive_rmse  <- RMSE(validation$rating, mu)
+naive_rmse
+```
+
+The result is more than **1** which is slightly more than one star and much higher than our goal; less than **0.86490**.
+
+We add our first result to an output table.
+
+```{r c21, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE, cache = TRUE}
+options(pillar.sigfig = 5)
+results <- tibble(method = "Average", RMSE = naive_rmse)
+results
+```
+
+## Movie effect
+From sections 3.2.3 and 3.2.6 we learn that some movies are rated more often than others. To calculate this we could use the (lm)     function, however, due to the amount of data it will be very slow. We know that the least squares estimate is just the average of (rating - mu) for each movie.
+
+```{r c22, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE, cache = TRUE}
+#Movie Effect
+movie_effect <- edx %>% 
+  group_by(movieId) %>% 
+  summarise(b_i = mean(rating - mu))
+```
+
+The least square estimate plot shows a variation between -3 and 1.5, which again shows that the majority of the movies are rated around the 3.5 average.
+
+```{r c23, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE}
+movie_effect %>%
+  ggplot(aes(b_i)) +
+  geom_histogram(bins = 10, color = "#ffffff", fill = "#34495e") +
+  xlab("b_i") +
+  ylab("Count") +
+  theme_light()
+```
+
+```{r c24, echo = TRUE, message = FALSE, warning = FALSE, results="hide", cache = TRUE}
+#Movie effect prediction  
+prediction <- validation %>% 
+  left_join(movie_effect, by='movieId') %>%
+  mutate(p = mu + b_i) 
+```
+
+We see an improvement of more than 11% compared with our first approach; RMSE **0.94391**. 
+
+```{r c25, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+#Movie effect RMSE
+me_rmse <- RMSE(validation$rating, prediction$p)
+options(pillar.sigfig = 5)
+results <- results %>%
+  add_row(method = "Movie effect", RMSE = me_rmse)
+results
+```
+
+## User effect
+In section **3.2.4** we have seen that users differently rate movies and realise that not every user rated the same amount of movies.
+
+```{r c26, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE, cache = TRUE}
+#User Effect
+user_effect <- edx %>% 
+  left_join(movie_effect, by='movieId') %>%
+  group_by(userId) %>% 
+  summarise(u_i = mean(rating - mu - b_i))
+```
+
+```{r c27, echo = TRUE, message = FALSE, warning = FALSE, results="hide", cache = TRUE}
+#User effect prediction  
+prediction <- validation %>% 
+  left_join(movie_effect, by='movieId') %>%
+  left_join(user_effect, by='userId') %>%
+  mutate(p = mu + b_i + u_i) 
+```
+
+We see again an improvement with a **0.86535** RMSE. 
+
+```{r c28, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+#Movie and User effects RMSE
+ue_rmse <- RMSE(validation$rating, prediction$p)
+options(pillar.sigfig = 5)
+results <- results %>%
+  add_row(method = "User effect", RMSE = ue_rmse)
+results
+```
+
+## Genre effect
+Form our data analysis we can conclude that some genres are better rated, section **3.2.5**. We also believe that the compound genres should not be divided because it eventually loses its meaning.
+
+```{r c29, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE, cache = TRUE}
+#Genre Effect
+genre_effect <- edx %>% 
+  left_join(movie_effect, by='movieId') %>%
+  left_join(user_effect, by='userId') %>%
+  group_by(genres) %>% 
+  summarise(g_i = mean(rating - mu - b_i - u_i))
+```
+
+```{r c30, echo = TRUE, message = FALSE, warning = FALSE, results="hide", cache = TRUE}
+#Genre effect prediction  
+prediction <- validation %>% 
+  left_join(movie_effect, by='movieId') %>%
+  left_join(user_effect, by='userId') %>%
+  left_join(genre_effect, by='genres') %>%
+  mutate(p = mu + b_i + u_i + g_i) 
+```
+
+Applcation of this adjustment has the effect of lowering the RMSE slightly to **0.86495**.
+
+```{r c31, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+#Movie, User and Genre effects RMSE
+ge_rmse <- RMSE(validation$rating, prediction$p)
+options(pillar.sigfig = 5)
+results <- results %>%
+  add_row(method = "Genre effect", RMSE = ge_rmse)
+results
+```
+
+## Year effect
+In section **3.2.6** we have shown that movies released in 1995 were more often rated than other years.
+
+```{r c32, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE, cache = TRUE}
+#Year effect
+year_effect <- edx %>% 
+  left_join(movie_effect, by='movieId') %>%
+  left_join(user_effect, by='userId') %>%
+  left_join(genre_effect, by='genres') %>%
+  mutate(year = str_sub(title, -5, -2))  %>%
+  group_by(year) %>% 
+  summarise(y_i = mean(rating - mu - b_i - u_i - g_i))
+```
+
+```{r c33, echo = TRUE, message = FALSE, warning = FALSE, results="hide", cache = TRUE}
+#Year effects prediction  
+prediction <- validation %>% 
+  left_join(movie_effect, by='movieId') %>%
+  left_join(user_effect, by='userId') %>%
+  left_join(genre_effect, by='genres') %>%
+  mutate(year = str_sub(title, -5, -2))  %>%
+  left_join(year_effect, by='year') %>%
+  mutate(pred = mu + b_i + u_i + g_i + y_i) 
+```
+
+The release year has not a significant effect but already enough to reach our objective.
+
+```{r c34, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+#Movie, User, Genre and Year effects RMSE
+ye_rmse <- RMSE(validation$rating, prediction$pred)
+options(pillar.sigfig = 5)
+results <- results %>%
+  add_row(method = "Year effect", RMSE = ye_rmse)
+results
+```
+
+## Regularisation
+To improve our prediction we will examine the movies where there are large differences between actual ratings and those predicted by this model. 
+
+```{r c35, message = FALSE, warning = FALSE, cache = TRUE}
+#The residual is the difference between the average actual rating and the prediction
+residuals <- prediction %>%
+  group_by(movieId) %>%
+  summarise(residual = mean(rating) - mean(pred)) %>%
+  arrange(desc(abs(residual))) %>%
+  slice(1:100)
+
+#Count movies
+edx_count <- edx %>%
+  group_by(movieId) %>%
+  summarise(n = n())
+  
+#plot the highest residuals in relation with the number of ratings of the training set
+residuals %>%
+  inner_join(edx_count, by = "movieId") %>%
+  ggplot(aes(x = n, y = residual)) + 
+  geom_point(alpha = 2/10) +
+  xlab("Count of ratings") +
+  ylab("Residual") +
+  theme_light()
+```
+
+We see from this plot that the movies with the highest residual are rated less than 40 times and in some cases just once. Knowing that the average number of ratings per movies is **843**, the prediction for movies rated less than **40** times in the training set is less accurate.
+
+Show me the movies
+
+```{r c36, render = lemon_print, message = FALSE, warning = FALSE, cache = TRUE}
+#Get movie title
+movie_titles <- edx %>%
+  select(movieId, title) %>%
+  distinct()
+
+residuals %>%
+  inner_join(movie_titles, by = "movieId") %>%
+  inner_join(edx_count, by = "movieId") %>%
+  arrange(n) %>%
+  slice(1:10)
+```
+
+The table (which shows the first 10 of the movies rated least often) indicates that these are obscure titles.
+
+### Penalise regression
+In order to remove the distortion of high ratings made in small numbers for obscure movies, we will adjust our calculations to weight these less highly in our calculations.
+
+The general idea of penalised regression (weighting) is to control the total variability of the movie effects by adding a penalty.
+When our sample size is very large, the weighting value (represented by Lambda) is effectively ignored. When the sample is small, the estimated Lambda shrinks.
+However, we need to choose the right Lambda value. If the Lambda value is too high we run the risk of under-fitting the data.
+
+```{r c37, echo = TRUE, message = FALSE, warning = FALSE, cache = TRUE}
+#The lambda ranges, to choose an ideal one
+lambdas <- seq(4, 6, 0.25)
+
+rmses <- sapply(lambdas, function(l) {
+  
+  #Movie Effect
+  movie_effect <- edx %>% 
+    group_by(movieId) %>% 
+    summarise(b_i = sum(rating - mu) / (n() + l))
+  
+  #User Effect
+  user_effect <- edx %>% 
+    left_join(movie_effect, by='movieId') %>%
+    group_by(userId) %>% 
+    summarise(u_i = sum(rating - mu - b_i) / (n() + l))
+  
+  #Genre Effect
+  genre_effect <- edx %>% 
+    left_join(movie_effect, by='movieId') %>%
+    left_join(user_effect, by='userId') %>%
+    group_by(genres) %>% 
+    summarise(g_i = sum(rating - mu - b_i - u_i) / (n() + l))
+  
+  #Year Effect
+  year_effect <- edx %>% 
+    left_join(movie_effect, by='movieId') %>%
+    left_join(user_effect, by='userId') %>%
+    left_join(genre_effect, by='genres') %>%
+    mutate(year = str_sub(title, -5, -2))  %>%
+    group_by(year) %>% 
+    summarise(y_i = sum(rating - mu - b_i - u_i - g_i) / (n() + l))
+  
+  
+  #All effects prediction  
+  prediction <- validation %>% 
+    left_join(movie_effect, by='movieId') %>%
+    left_join(user_effect, by='userId') %>%
+    left_join(genre_effect, by='genres') %>%
+    mutate(year = str_sub(title, -5, -2))  %>%
+    left_join(year_effect, by='year') %>%
+    mutate(p = mu + b_i + u_i + g_i + y_i) 
+  
+  return(rmse = RMSE(validation$rating, prediction$p))
+})
+```
+
+```{r c38, message = FALSE, warning = FALSE, echo = FALSE, cache = TRUE}
+rmses
+
+lambda_rmse <- data.frame(lambdas, rmses)
+
+lambda_rmse %>%
+  ggplot(aes(lambdas, rmses)) +
+  geom_point() +
+  xlab("Lambda") +
+  ylab("RMSE") +
+  theme_light()
+
+lambdas[which.min(rmses)]
+```
+
+The chart above shows clearly that a Lambda value of **5** produces the lowest RMSE (**0.8642929**)
+
+\pagebreak
+
+The final result
+
+```{r 39, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+#Regularisation
+options(pillar.sigfig = 5)
+results <- results %>%
+  add_row(method = "Regularisation effect", RMSE = 0.8642929)
+results
+```
+
+
+
+**FIN**
